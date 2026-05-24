@@ -99,7 +99,7 @@ async function uploadToDrive(imageBuffer, filename) {
     requestBody: {
       name: filename,
       mimeType: 'image/jpeg',
-      parents: [] // เก็บใน My Drive
+      parents: ['1Kwsm3J5mfpMbjK3r_mqsVor8GcGlcA-W']
     },
     media: {
       mimeType: 'image/jpeg',
