@@ -3,6 +3,7 @@ const line = require('@line/bot-sdk');
 const Anthropic = require('@anthropic-ai/sdk');
 const axios = require('axios');
 const { google } = require('googleapis');
+const { Readable } = require('stream');
 
 const LINE_CONFIG = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -11,6 +12,7 @@ const LINE_CONFIG = {
 
 const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+const DRIVE_FOLDER_ID = '1Kwsm3J5mfpMbjK3r_mqsVor8GcGlcA-W';
 
 const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
 const auth = new google.auth.GoogleAuth({
@@ -41,24 +43,25 @@ async function handleEvent(event) {
   if (event.type !== 'message') return;
   const { replyToken, message } = event;
 
-  // ============ รับรูป OPD ============
   if (message.type === 'image') {
     try {
-      // ดาวน์โหลดรูป
       const imageBuffer = await downloadLineImage(message.id);
       const base64Image = imageBuffer.toString('base64');
-
-      // อ่านข้อมูลด้วย Claude
       const patientData = await extractOPDData(base64Image);
       if (!patientData) return;
 
       // อัปโหลดรูปขึ้น Google Drive
-      const driveUrl = await uploadToDrive(imageBuffer, `OPD_${patientData.ชื่อนามสกุล || 'unknown'}_${Date.now()}.jpg`);
+      let driveUrl = '';
+      try {
+        driveUrl = await uploadToDrive(imageBuffer, `OPD_${patientData.ชื่อนามสกุล || 'unknown'}_${Date.now()}.jpg`);
+      } catch (driveErr) {
+        console.error('Drive error:', driveErr.message);
+        driveUrl = 'อัปโหลดไม่สำเร็จ';
+      }
 
-      // บันทึกลง Sheets พร้อมลิงก์รูป
+      // บันทึกลง Sheets
       await saveToSheets(patientData, driveUrl);
 
-      // Reply สรุปสั้นๆ
       await lineClient.replyMessage({
         replyToken,
         messages: [{
@@ -78,43 +81,36 @@ async function handleEvent(event) {
     return;
   }
 
-  // ============ @3N ============
   if (message.type === 'text') {
     const text = message.text;
     if (!text.includes('@3N') && !text.includes('@3n')) return;
     await lineClient.replyMessage({
       replyToken,
-      messages: [{ type: 'text', text: `สวัสดีครับ 🤖 3N Bot\nส่งรูป OPD มาได้เลยครับ บันทึกอัตโนมัติเลย` }]
+      messages: [{ type: 'text', text: `สวัสดีครับ 🤖 3N Bot\nส่งรูป OPD มาได้เลยครับ` }]
     });
   }
 }
 
 async function uploadToDrive(imageBuffer, filename) {
-  const { Readable } = require('stream');
   const stream = new Readable();
   stream.push(imageBuffer);
   stream.push(null);
 
   const response = await drive.files.create({
+    supportsAllDrives: true,
     requestBody: {
       name: filename,
       mimeType: 'image/jpeg',
-      parents: ['1Kwsm3J5mfpMbjK3r_mqsVor8GcGlcA-W']
+      parents: [DRIVE_FOLDER_ID]
     },
-    media: {
-      mimeType: 'image/jpeg',
-      body: stream
-    },
+    media: { mimeType: 'image/jpeg', body: stream },
     fields: 'id, webViewLink'
   });
 
-  // เปิดสิทธิ์ให้ดูได้
   await drive.permissions.create({
     fileId: response.data.id,
-    requestBody: {
-      role: 'reader',
-      type: 'anyone'
-    }
+    supportsAllDrives: true,
+    requestBody: { role: 'reader', type: 'anyone' }
   });
 
   return response.data.webViewLink;
@@ -139,10 +135,9 @@ async function saveToSheets(data, driveUrl) {
     data.แผนก || '',
     'รพ.ราษฎร์บูรณะ',
     '⚠️ รอตรวจสอบ',
-    driveUrl || ''
+    driveUrl
   ];
 
-  // เช็ค header
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: 'Sheet1!A1'
