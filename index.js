@@ -12,7 +12,7 @@ const LINE_CONFIG = {
 
 const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-const DRIVE_FOLDER_ID = '1Kwsm3J5mfpMbjK3r_mqsVor8GcGlcA-W';
+const DRIVE_FOLDER_ID = '0AAhav0FkerGkUk9PVA';
 
 const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
 const auth = new google.auth.GoogleAuth({
