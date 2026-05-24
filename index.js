@@ -15,16 +15,18 @@ const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
 const auth = new google.auth.GoogleAuth({
   credentials: serviceAccount,
-  scopes: ['https://www.googleapis.com/auth/spreadsheets']
+  scopes: [
+    'https://www.googleapis.com/auth/spreadsheets',
+    'https://www.googleapis.com/auth/drive'
+  ]
 });
 const sheets = google.sheets({ version: 'v4', auth });
+const drive = google.drive({ version: 'v3', auth });
 
 const app = express();
 const lineClient = new line.messagingApi.MessagingApiClient({
   channelAccessToken: LINE_CONFIG.channelAccessToken
 });
-
-const pendingCases = {};
 
 app.get('/', (req, res) => res.send('3N Sleep Bot is running ✅'));
 
@@ -37,116 +39,88 @@ app.post('/webhook', line.middleware(LINE_CONFIG), async (req, res) => {
 
 async function handleEvent(event) {
   if (event.type !== 'message') return;
-  const { replyToken, source, message } = event;
-  const userId = source.userId;
+  const { replyToken, message } = event;
 
+  // ============ รับรูป OPD ============
   if (message.type === 'image') {
     try {
+      // ดาวน์โหลดรูป
       const imageBuffer = await downloadLineImage(message.id);
       const base64Image = imageBuffer.toString('base64');
+
+      // อ่านข้อมูลด้วย Claude
       const patientData = await extractOPDData(base64Image);
       if (!patientData) return;
 
-      pendingCases[userId] = patientData;
+      // อัปโหลดรูปขึ้น Google Drive
+      const driveUrl = await uploadToDrive(imageBuffer, `OPD_${patientData.ชื่อนามสกุล || 'unknown'}_${Date.now()}.jpg`);
 
+      // บันทึกลง Sheets พร้อมลิงก์รูป
+      await saveToSheets(patientData, driveUrl);
+
+      // Reply สรุปสั้นๆ
       await lineClient.replyMessage({
         replyToken,
         messages: [{
-          type: 'template',
-          altText: 'ยืนยันข้อมูลคนไข้',
-          template: {
-            type: 'buttons',
-            text: `📋 ตรวจสอบข้อมูลด้วยนะครับ\n` +
-                  `👤 ชื่อ: ${patientData.ชื่อนามสกุล || '-'}\n` +
-                  `📞 เบอร์: ${patientData.เบอร์โทรหลัก || '-'}\n` +
-                  `🏥 HN: ${patientData.HN || '-'}\n` +
-                  `🔬 ตรวจ: ${patientData.ประเภทการตรวจ || '-'}\n` +
-                  `💊 โรค: ${patientData.โรคประจำตัว || '-'}\n` +
-                  `📊 ESS: ${patientData.คะแนนESS || '-'}`,
-            actions: [
-              { type: 'message', label: '✅ ถูกต้อง บันทึกเลย', text: 'ยืนยัน_บันทึก' },
-              { type: 'message', label: '✏️ รบกวน 3N ช่วยแก้', text: 'ขอให้3Nแก้ไข' },
-              { type: 'message', label: '❌ ยกเลิก ส่งรูปใหม่', text: 'ยกเลิก_แก้ไข' }
-            ]
-          }
+          type: 'text',
+          text: `✅ บันทึกแล้วครับ\n\n` +
+                `👤 ${patientData.ชื่อนามสกุล || '-'}\n` +
+                `📞 ${patientData.เบอร์โทรหลัก || '-'}\n` +
+                `🏥 HN: ${patientData.HN || '-'}\n` +
+                `🔬 ${patientData.ประเภทการตรวจ || '-'}\n\n` +
+                `⚠️ ทีมสามเอ็นจะตรวจสอบและโทรนัดครับ`
         }]
       });
+
     } catch (err) {
-      console.error('Image error:', err.message);
+      console.error('Error:', err.message);
     }
     return;
   }
 
+  // ============ @3N ============
   if (message.type === 'text') {
     const text = message.text;
-
-    // ยืนยันถูกต้อง
-    if (text === 'ยืนยัน_บันทึก') {
-      const patientData = pendingCases[userId];
-      if (!patientData) {
-        await lineClient.replyMessage({
-          replyToken,
-          messages: [{ type: 'text', text: 'ไม่พบข้อมูลที่รอบันทึกครับ กรุณาส่งรูป OPD ใหม่อีกครั้ง' }]
-        });
-        return;
-      }
-      try {
-        await saveToSheets(patientData, 'รอโทรนัด');
-        delete pendingCases[userId];
-        await lineClient.replyMessage({
-          replyToken,
-          messages: [{ type: 'text', text: `✅ บันทึกลง Google Sheets แล้วครับ!\n\n👤 ${patientData.ชื่อนามสกุล || '-'}\n📞 ${patientData.เบอร์โทรหลัก || '-'}\n🏥 HN: ${patientData.HN || '-'}\n\nสามเอ็นจะโทรนัดภายใน 24 ชม. ครับ 🙏` }]
-        });
-      } catch (err) {
-        console.error('Sheets error:', err.message);
-      }
-      return;
-    }
-
-    // ขอให้ 3N แก้ไข
-    if (text === 'ขอให้3Nแก้ไข') {
-      const patientData = pendingCases[userId];
-      if (!patientData) {
-        await lineClient.replyMessage({
-          replyToken,
-          messages: [{ type: 'text', text: 'ไม่พบข้อมูลที่รอบันทึกครับ กรุณาส่งรูป OPD ใหม่อีกครั้ง' }]
-        });
-        return;
-      }
-      try {
-        await saveToSheets(patientData, '⚠️ รอสามเอ็นตรวจสอบ');
-        delete pendingCases[userId];
-        await lineClient.replyMessage({
-          replyToken,
-          messages: [{ type: 'text', text: `📝 บันทึกแล้วครับ ทีมสามเอ็นจะตรวจสอบและแก้ไขให้นะครับ\n\n👤 ${patientData.ชื่อนามสกุล || '-'}\n📞 ${patientData.เบอร์โทรหลัก || '-'}\n🏥 HN: ${patientData.HN || '-'} 🙏` }]
-        });
-      } catch (err) {
-        console.error('Sheets error:', err.message);
-      }
-      return;
-    }
-
-    // ยกเลิก
-    if (text === 'ยกเลิก_แก้ไข') {
-      delete pendingCases[userId];
-      await lineClient.replyMessage({
-        replyToken,
-        messages: [{ type: 'text', text: 'ยกเลิกแล้วครับ กรุณาส่งรูป OPD ใหม่อีกครั้งครับ 🙏' }]
-      });
-      return;
-    }
-
-    // @3N
-    if (text.includes('@3N') || text.includes('@3n')) {
-      await lineClient.replyMessage({
-        replyToken,
-        messages: [{ type: 'text', text: `สวัสดีครับ 🤖 3N Bot\nส่งรูป OPD มาได้เลยครับ` }]
-      });
-    }
+    if (!text.includes('@3N') && !text.includes('@3n')) return;
+    await lineClient.replyMessage({
+      replyToken,
+      messages: [{ type: 'text', text: `สวัสดีครับ 🤖 3N Bot\nส่งรูป OPD มาได้เลยครับ บันทึกอัตโนมัติเลย` }]
+    });
   }
 }
 
-async function saveToSheets(data, status) {
+async function uploadToDrive(imageBuffer, filename) {
+  const { Readable } = require('stream');
+  const stream = new Readable();
+  stream.push(imageBuffer);
+  stream.push(null);
+
+  const response = await drive.files.create({
+    requestBody: {
+      name: filename,
+      mimeType: 'image/jpeg',
+      parents: [] // เก็บใน My Drive
+    },
+    media: {
+      mimeType: 'image/jpeg',
+      body: stream
+    },
+    fields: 'id, webViewLink'
+  });
+
+  // เปิดสิทธิ์ให้ดูได้
+  await drive.permissions.create({
+    fileId: response.data.id,
+    requestBody: {
+      role: 'reader',
+      type: 'anyone'
+    }
+  });
+
+  return response.data.webViewLink;
+}
+
+async function saveToSheets(data, driveUrl) {
   const now = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' });
   const row = [
     now,
@@ -164,9 +138,11 @@ async function saveToSheets(data, status) {
     data.แพทย์ผู้ส่ง || '',
     data.แผนก || '',
     'รพ.ราษฎร์บูรณะ',
-    status
+    '⚠️ รอตรวจสอบ',
+    driveUrl || ''
   ];
 
+  // เช็ค header
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: 'Sheet1!A1'
@@ -178,14 +154,14 @@ async function saveToSheets(data, status) {
       range: 'Sheet1!A1',
       valueInputOption: 'RAW',
       requestBody: {
-        values: [['วันที่รับ','ชื่อ-นามสกุล','HN','เบอร์โทรหลัก','เบอร์โทรสำรอง','อายุ','น้ำหนัก (กก.)','ส่วนสูง (ซม.)','ประเภทการตรวจ','โรคประจำตัว','ยาที่ใช้','คะแนน ESS','แพทย์ผู้ส่ง','แผนก','โรงพยาบาล','สถานะ']]
+        values: [['วันที่รับ','ชื่อ-นามสกุล','HN','เบอร์โทรหลัก','เบอร์โทรสำรอง','อายุ','น้ำหนัก (กก.)','ส่วนสูง (ซม.)','ประเภทการตรวจ','โรคประจำตัว','ยาที่ใช้','คะแนน ESS','แพทย์ผู้ส่ง','แผนก','โรงพยาบาล','สถานะ','รูป OPD']]
       }
     });
   }
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
-    range: 'Sheet1!A:P',
+    range: 'Sheet1!A:Q',
     valueInputOption: 'RAW',
     requestBody: { values: [row] }
   });
