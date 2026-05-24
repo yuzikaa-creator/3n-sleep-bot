@@ -30,6 +30,9 @@ const lineClient = new line.messagingApi.MessagingApiClient({
   channelAccessToken: LINE_CONFIG.channelAccessToken
 });
 
+// เก็บ userId ที่พิมพ์ OPD แล้วรอส่งรูป (หมดอายุใน 5 นาที)
+const opdReady = {};
+
 app.get('/', (req, res) => res.send('3N Sleep Bot is running ✅'));
 
 app.post('/webhook', line.middleware(LINE_CONFIG), async (req, res) => {
@@ -41,14 +44,60 @@ app.post('/webhook', line.middleware(LINE_CONFIG), async (req, res) => {
 
 async function handleEvent(event) {
   if (event.type !== 'message') return;
-  const { replyToken, message } = event;
+  const { replyToken, source, message } = event;
+  const userId = source.userId;
 
+  // ============ รับข้อความ ============
+  if (message.type === 'text') {
+    const text = message.text.trim().toUpperCase();
+
+    // พิมพ์ OPD → พร้อมรับรูป
+    if (text === 'OPD') {
+      opdReady[userId] = Date.now();
+      await lineClient.replyMessage({
+        replyToken,
+        messages: [{ type: 'text', text: '📋 พร้อมแล้วครับ ส่งรูป OPD ได้เลย (มีเวลา 5 นาที)' }]
+      });
+      return;
+    }
+
+    // @3N
+    if (message.text.includes('@3N') || message.text.includes('@3n')) {
+      await lineClient.replyMessage({
+        replyToken,
+        messages: [{ type: 'text', text: `สวัสดีครับ 🤖 3N Bot\nพิมพ์ "OPD" แล้วส่งรูปได้เลยครับ` }]
+      });
+    }
+    return;
+  }
+
+  // ============ รับรูป ============
   if (message.type === 'image') {
+    // เช็คว่าพิมพ์ OPD แล้วไหม และยังไม่หมดเวลา 5 นาที
+    const readyTime = opdReady[userId];
+    const fiveMinutes = 5 * 60 * 1000;
+
+    if (!readyTime || Date.now() - readyTime > fiveMinutes) {
+      // ไม่ได้พิมพ์ OPD ก่อน → เงียบ ไม่ทำอะไร
+      return;
+    }
+
+    // ลบ flag ออก (ส่งรูปได้ครั้งเดียวต่อการพิมพ์ OPD)
+    // ถ้าต้องการส่งหลายรูป comment บรรทัดนี้ออก
+    // delete opdReady[userId];
+
     try {
       const imageBuffer = await downloadLineImage(message.id);
       const base64Image = imageBuffer.toString('base64');
       const patientData = await extractOPDData(base64Image);
-      if (!patientData) return;
+
+      if (!patientData) {
+        await lineClient.replyMessage({
+          replyToken,
+          messages: [{ type: 'text', text: '❌ อ่านข้อมูลไม่ได้ครับ กรุณาส่งรูป OPD ที่ชัดขึ้น' }]
+        });
+        return;
+      }
 
       // อัปโหลดรูปขึ้น Google Drive
       let driveUrl = '';
@@ -78,16 +127,6 @@ async function handleEvent(event) {
     } catch (err) {
       console.error('Error:', err.message);
     }
-    return;
-  }
-
-  if (message.type === 'text') {
-    const text = message.text;
-    if (!text.includes('@3N') && !text.includes('@3n')) return;
-    await lineClient.replyMessage({
-      replyToken,
-      messages: [{ type: 'text', text: `สวัสดีครับ 🤖 3N Bot\nส่งรูป OPD มาได้เลยครับ` }]
-    });
   }
 }
 
