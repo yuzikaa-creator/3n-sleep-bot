@@ -1,7 +1,6 @@
 const express = require('express');
 const line = require('@line/bot-sdk');
 const Anthropic = require('@anthropic-ai/sdk');
-const admin = require('firebase-admin');
 const axios = require('axios');
 
 const LINE_CONFIG = {
@@ -10,12 +9,6 @@ const LINE_CONFIG = {
 };
 
 const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
-
-admin.initializeApp({
-  credential: admin.credential.applicationDefault(),
-  projectId: process.env.FIREBASE_PROJECT_ID || 'n-sleep-app'
-});
-const db = admin.firestore();
 
 const app = express();
 const lineClient = new line.messagingApi.MessagingApiClient({
@@ -26,32 +19,23 @@ app.get('/', (req, res) => res.send('3N Sleep Bot is running ✅'));
 
 app.post('/webhook', line.middleware(LINE_CONFIG), async (req, res) => {
   res.sendStatus(200);
-  const events = req.body.events;
-  for (const event of events) {
+  for (const event of req.body.events) {
     await handleEvent(event);
   }
 });
 
 async function handleEvent(event) {
   if (event.type !== 'message') return;
-  const { replyToken, source, message } = event;
-  const groupId = source.groupId || source.userId;
-  const userId = source.userId;
+  const { replyToken, message } = event;
 
+  // รับรูป OPD
   if (message.type === 'image') {
     try {
       const imageBuffer = await downloadLineImage(message.id);
       const base64Image = imageBuffer.toString('base64');
       const patientData = await extractOPDData(base64Image);
-      if (!patientData) return;
 
-      const docRef = await db.collection('cases').add({
-        ...patientData,
-        hospital: 'รพ.ราษฎร์บูรณะ',
-        status: 'รอโทรนัด',
-        groupId, userId,
-        createdAt: admin.firestore.FieldValue.serverTimestamp()
-      });
+      if (!patientData) return; // ไม่ใช่ OPD ไม่ตอบ
 
       await lineClient.replyMessage({
         replyToken,
@@ -67,32 +51,18 @@ async function handleEvent(event) {
         }]
       });
     } catch (err) {
-      console.error('Image error:', err);
+      console.error('Image error:', err.message);
     }
     return;
   }
 
+  // รับ @3N
   if (message.type === 'text') {
     const text = message.text;
     if (!text.includes('@3N') && !text.includes('@3n')) return;
-
-    const query = text.replace(/@3[Nn]/g, '').trim();
-    if (query.includes('วันนี้') || query.includes('case') || query.includes('สรุป')) {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const snapshot = await db.collection('cases').where('createdAt', '>=', today).get();
-      const total = snapshot.size;
-      const waiting = snapshot.docs.filter(d => d.data().status === 'รอโทรนัด').length;
-      await lineClient.replyMessage({
-        replyToken,
-        messages: [{ type: 'text', text: `📊 สรุป case วันนี้\nทั้งหมด: ${total} case\nรอโทรนัด: ${waiting} case` }]
-      });
-      return;
-    }
-
     await lineClient.replyMessage({
       replyToken,
-      messages: [{ type: 'text', text: `สวัสดีครับ 🤖 3N Bot\nส่งรูป OPD มาได้เลยครับ\n\nคำสั่ง: @3N วันนี้` }]
+      messages: [{ type: 'text', text: `สวัสดีครับ 🤖 3N Bot\nส่งรูป OPD มาได้เลยครับ` }]
     });
   }
 }
@@ -116,7 +86,7 @@ async function extractOPDData(base64Image) {
       role: 'user',
       content: [
         { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64Image } },
-        { type: 'text', text: `อ่าน OPD record แล้วดึงข้อมูล ตอบเป็น JSON เท่านั้น:\n{"name":"","phone":"","hn":"","testType":"","disease":"","medication":"","doctor":"","ess":""}\nถ้าไม่ใช่ OPD record ตอบว่า NOT_OPD` }
+        { type: 'text', text: `อ่าน OPD record แล้วดึงข้อมูล ตอบเป็น JSON เท่านั้น ไม่มีคำอธิบาย:\n{"name":"","phone":"","hn":"","testType":"","disease":"","medication":"","doctor":""}\nถ้าไม่ใช่ OPD record ตอบว่า NOT_OPD` }
       ]
     }]
   });
