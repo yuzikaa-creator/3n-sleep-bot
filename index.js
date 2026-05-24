@@ -10,10 +10,8 @@ const LINE_CONFIG = {
 };
 
 const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
-
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 
-// Google Sheets Auth
 const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
 const auth = new google.auth.GoogleAuth({
   credentials: serviceAccount,
@@ -26,6 +24,9 @@ const lineClient = new line.messagingApi.MessagingApiClient({
   channelAccessToken: LINE_CONFIG.channelAccessToken
 });
 
+// เก็บข้อมูลรอยืนยัน (key = userId, value = patientData)
+const pendingCases = {};
+
 app.get('/', (req, res) => res.send('3N Sleep Bot is running ✅'));
 
 app.post('/webhook', line.middleware(LINE_CONFIG), async (req, res) => {
@@ -37,8 +38,10 @@ app.post('/webhook', line.middleware(LINE_CONFIG), async (req, res) => {
 
 async function handleEvent(event) {
   if (event.type !== 'message') return;
-  const { replyToken, message } = event;
+  const { replyToken, source, message } = event;
+  const userId = source.userId;
 
+  // ============ กรณีส่งรูปมา ============
   if (message.type === 'image') {
     try {
       const imageBuffer = await downloadLineImage(message.id);
@@ -46,24 +49,30 @@ async function handleEvent(event) {
       const patientData = await extractOPDData(base64Image);
       if (!patientData) return;
 
-      // บันทึกลง Google Sheets
-      await saveToSheets(patientData);
+      // เก็บข้อมูลไว้รอยืนยัน
+      pendingCases[userId] = patientData;
 
+      // Reply พร้อมปุ่มยืนยัน
       await lineClient.replyMessage({
         replyToken,
         messages: [{
-          type: 'text',
-          text: `✅ บันทึก case แล้วครับ\n\n` +
-                `👤 ชื่อ: ${patientData.ชื่อนามสกุล || '-'}\n` +
-                `📞 เบอร์หลัก: ${patientData.เบอร์โทรหลัก || '-'}\n` +
-                `📞 เบอร์สำรอง: ${patientData.เบอร์โทรสำรอง || '-'}\n` +
-                `🏥 HN: ${patientData.HN || '-'}\n` +
-                `🔬 ตรวจ: ${patientData.ประเภทการตรวจ || '-'}\n` +
-                `💊 โรคประจำตัว: ${patientData.โรคประจำตัว || '-'}\n` +
-                `💊 ยาที่ใช้: ${patientData.ยาที่ใช้ || '-'}\n` +
-                `📊 ESS: ${patientData.คะแนนESS || '-'}\n` +
-                `👨‍⚕️ แพทย์: ${patientData.แพทย์ผู้ส่ง || '-'}\n\n` +
-                `บันทึกลง Google Sheets แล้วครับ 📋`
+          type: 'template',
+          altText: 'ยืนยันข้อมูลคนไข้',
+          template: {
+            type: 'confirm',
+            text: `📋 ตรวจสอบข้อมูลด้วยนะครับ\n\n` +
+                  `👤 ชื่อ: ${patientData.ชื่อนามสกุล || '-'}\n` +
+                  `📞 เบอร์: ${patientData.เบอร์โทรหลัก || '-'}\n` +
+                  `🏥 HN: ${patientData.HN || '-'}\n` +
+                  `🔬 ตรวจ: ${patientData.ประเภทการตรวจ || '-'}\n` +
+                  `💊 โรค: ${patientData.โรคประจำตัว || '-'}\n` +
+                  `📊 ESS: ${patientData.คะแนนESS || '-'}\n\n` +
+                  `ข้อมูลถูกต้องไหมครับ?`,
+            actions: [
+              { type: 'message', label: '✅ ถูกต้อง บันทึกเลย', text: 'ยืนยัน_บันทึก' },
+              { type: 'message', label: '❌ ข้อมูลผิด แก้ไข', text: 'ยกเลิก_แก้ไข' }
+            ]
+          }
         }]
       });
     } catch (err) {
@@ -72,13 +81,61 @@ async function handleEvent(event) {
     return;
   }
 
+  // ============ กรณีกดปุ่มยืนยัน ============
   if (message.type === 'text') {
     const text = message.text;
-    if (!text.includes('@3N') && !text.includes('@3n')) return;
-    await lineClient.replyMessage({
-      replyToken,
-      messages: [{ type: 'text', text: `สวัสดีครับ 🤖 3N Bot\nส่งรูป OPD มาได้เลยครับ จะบันทึกลง Google Sheets อัตโนมัติ` }]
-    });
+
+    if (text === 'ยืนยัน_บันทึก') {
+      const patientData = pendingCases[userId];
+      if (!patientData) {
+        await lineClient.replyMessage({
+          replyToken,
+          messages: [{ type: 'text', text: 'ไม่พบข้อมูลที่รอบันทึกครับ กรุณาส่งรูป OPD ใหม่อีกครั้ง' }]
+        });
+        return;
+      }
+
+      try {
+        await saveToSheets(patientData);
+        delete pendingCases[userId];
+
+        await lineClient.replyMessage({
+          replyToken,
+          messages: [{ 
+            type: 'text', 
+            text: `✅ บันทึกลง Google Sheets แล้วครับ!\n\n` +
+                  `👤 ${patientData.ชื่อนามสกุล || '-'}\n` +
+                  `📞 ${patientData.เบอร์โทรหลัก || '-'}\n` +
+                  `🏥 HN: ${patientData.HN || '-'}\n\n` +
+                  `สามเอ็นจะโทรนัดภายใน 24 ชม. ครับ 🙏`
+          }]
+        });
+      } catch (err) {
+        console.error('Sheets error:', err.message);
+        await lineClient.replyMessage({
+          replyToken,
+          messages: [{ type: 'text', text: 'เกิดข้อผิดพลาดในการบันทึกครับ กรุณาลองใหม่อีกครั้ง' }]
+        });
+      }
+      return;
+    }
+
+    if (text === 'ยกเลิก_แก้ไข') {
+      delete pendingCases[userId];
+      await lineClient.replyMessage({
+        replyToken,
+        messages: [{ type: 'text', text: 'ยกเลิกแล้วครับ กรุณาส่งรูป OPD ใหม่อีกครั้งครับ 🙏' }]
+      });
+      return;
+    }
+
+    // @3N
+    if (text.includes('@3N') || text.includes('@3n')) {
+      await lineClient.replyMessage({
+        replyToken,
+        messages: [{ type: 'text', text: `สวัสดีครับ 🤖 3N Bot\nส่งรูป OPD มาได้เลยครับ` }]
+      });
+    }
   }
 }
 
@@ -103,7 +160,6 @@ async function saveToSheets(data) {
     'รอโทรนัด'
   ];
 
-  // เพิ่ม header ถ้ายังไม่มี
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: 'Sheet1!A1'
@@ -147,7 +203,7 @@ async function extractOPDData(base64Image) {
       role: 'user',
       content: [
         { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64Image } },
-        { type: 'text', text: `อ่าน OPD record แล้วดึงข้อมูลต่อไปนี้เป็นภาษาไทย ตอบเป็น JSON เท่านั้น ไม่มีคำอธิบาย:
+        { type: 'text', text: `อ่าน OPD record แล้วดึงข้อมูลต่อไปนี้ให้ละเอียดที่สุด ตอบเป็น JSON เท่านั้น ไม่มีคำอธิบาย:
 {"ชื่อนามสกุล":"","HN":"","เบอร์โทรหลัก":"","เบอร์โทรสำรอง":"","อายุ":"","น้ำหนัก":"","ส่วนสูง":"","ประเภทการตรวจ":"","โรคประจำตัว":"","ยาที่ใช้":"","คะแนนESS":"","แพทย์ผู้ส่ง":"","แผนก":""}
 ถ้าไม่ใช่ OPD record ตอบว่า NOT_OPD` }
       ]
