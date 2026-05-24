@@ -2,6 +2,7 @@ const express = require('express');
 const line = require('@line/bot-sdk');
 const Anthropic = require('@anthropic-ai/sdk');
 const axios = require('axios');
+const { google } = require('googleapis');
 
 const LINE_CONFIG = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -9,6 +10,16 @@ const LINE_CONFIG = {
 };
 
 const anthropic = new Anthropic({ apiKey: process.env.CLAUDE_API_KEY });
+
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+
+// Google Sheets Auth
+const serviceAccount = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+const auth = new google.auth.GoogleAuth({
+  credentials: serviceAccount,
+  scopes: ['https://www.googleapis.com/auth/spreadsheets']
+});
+const sheets = google.sheets({ version: 'v4', auth });
 
 const app = express();
 const lineClient = new line.messagingApi.MessagingApiClient({
@@ -28,26 +39,31 @@ async function handleEvent(event) {
   if (event.type !== 'message') return;
   const { replyToken, message } = event;
 
-  // รับรูป OPD
   if (message.type === 'image') {
     try {
       const imageBuffer = await downloadLineImage(message.id);
       const base64Image = imageBuffer.toString('base64');
       const patientData = await extractOPDData(base64Image);
+      if (!patientData) return;
 
-      if (!patientData) return; // ไม่ใช่ OPD ไม่ตอบ
+      // บันทึกลง Google Sheets
+      await saveToSheets(patientData);
 
       await lineClient.replyMessage({
         replyToken,
         messages: [{
           type: 'text',
           text: `✅ บันทึก case แล้วครับ\n\n` +
-                `👤 ชื่อ: ${patientData.name || '-'}\n` +
-                `📞 เบอร์: ${patientData.phone || '-'}\n` +
-                `🏥 HN: ${patientData.hn || '-'}\n` +
-                `🔬 ตรวจ: ${patientData.testType || '-'}\n` +
-                `💊 โรคประจำตัว: ${patientData.disease || '-'}\n\n` +
-                `สามเอ็นจะโทรนัดภายใน 24 ชม. ครับ`
+                `👤 ชื่อ: ${patientData.ชื่อนามสกุล || '-'}\n` +
+                `📞 เบอร์หลัก: ${patientData.เบอร์โทรหลัก || '-'}\n` +
+                `📞 เบอร์สำรอง: ${patientData.เบอร์โทรสำรอง || '-'}\n` +
+                `🏥 HN: ${patientData.HN || '-'}\n` +
+                `🔬 ตรวจ: ${patientData.ประเภทการตรวจ || '-'}\n` +
+                `💊 โรคประจำตัว: ${patientData.โรคประจำตัว || '-'}\n` +
+                `💊 ยาที่ใช้: ${patientData.ยาที่ใช้ || '-'}\n` +
+                `📊 ESS: ${patientData.คะแนนESS || '-'}\n` +
+                `👨‍⚕️ แพทย์: ${patientData.แพทย์ผู้ส่ง || '-'}\n\n` +
+                `บันทึกลง Google Sheets แล้วครับ 📋`
         }]
       });
     } catch (err) {
@@ -56,15 +72,60 @@ async function handleEvent(event) {
     return;
   }
 
-  // รับ @3N
   if (message.type === 'text') {
     const text = message.text;
     if (!text.includes('@3N') && !text.includes('@3n')) return;
     await lineClient.replyMessage({
       replyToken,
-      messages: [{ type: 'text', text: `สวัสดีครับ 🤖 3N Bot\nส่งรูป OPD มาได้เลยครับ` }]
+      messages: [{ type: 'text', text: `สวัสดีครับ 🤖 3N Bot\nส่งรูป OPD มาได้เลยครับ จะบันทึกลง Google Sheets อัตโนมัติ` }]
     });
   }
+}
+
+async function saveToSheets(data) {
+  const now = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' });
+  const row = [
+    now,
+    data.ชื่อนามสกุล || '',
+    data.HN || '',
+    data.เบอร์โทรหลัก || '',
+    data.เบอร์โทรสำรอง || '',
+    data.อายุ || '',
+    data.น้ำหนัก || '',
+    data.ส่วนสูง || '',
+    data.ประเภทการตรวจ || '',
+    data.โรคประจำตัว || '',
+    data.ยาที่ใช้ || '',
+    data.คะแนนESS || '',
+    data.แพทย์ผู้ส่ง || '',
+    data.แผนก || '',
+    'รพ.ราษฎร์บูรณะ',
+    'รอโทรนัด'
+  ];
+
+  // เพิ่ม header ถ้ายังไม่มี
+  const response = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Sheet1!A1'
+  });
+
+  if (!response.data.values) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: 'Sheet1!A1',
+      valueInputOption: 'RAW',
+      requestBody: {
+        values: [['วันที่รับ','ชื่อ-นามสกุล','HN','เบอร์โทรหลัก','เบอร์โทรสำรอง','อายุ','น้ำหนัก (กก.)','ส่วนสูง (ซม.)','ประเภทการตรวจ','โรคประจำตัว','ยาที่ใช้','คะแนน ESS','แพทย์ผู้ส่ง','แผนก','โรงพยาบาล','สถานะ']]
+      }
+    });
+  }
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: 'Sheet1!A:P',
+    valueInputOption: 'RAW',
+    requestBody: { values: [row] }
+  });
 }
 
 async function downloadLineImage(messageId) {
@@ -86,7 +147,9 @@ async function extractOPDData(base64Image) {
       role: 'user',
       content: [
         { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: base64Image } },
-        { type: 'text', text: `อ่าน OPD record แล้วดึงข้อมูล ตอบเป็น JSON เท่านั้น ไม่มีคำอธิบาย:\n{"name":"","phone":"","hn":"","testType":"","disease":"","medication":"","doctor":""}\nถ้าไม่ใช่ OPD record ตอบว่า NOT_OPD` }
+        { type: 'text', text: `อ่าน OPD record แล้วดึงข้อมูลต่อไปนี้เป็นภาษาไทย ตอบเป็น JSON เท่านั้น ไม่มีคำอธิบาย:
+{"ชื่อนามสกุล":"","HN":"","เบอร์โทรหลัก":"","เบอร์โทรสำรอง":"","อายุ":"","น้ำหนัก":"","ส่วนสูง":"","ประเภทการตรวจ":"","โรคประจำตัว":"","ยาที่ใช้":"","คะแนนESS":"","แพทย์ผู้ส่ง":"","แผนก":""}
+ถ้าไม่ใช่ OPD record ตอบว่า NOT_OPD` }
       ]
     }]
   });
