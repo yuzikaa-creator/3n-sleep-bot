@@ -24,7 +24,7 @@ const lineClient = new line.messagingApi.MessagingApiClient({
   channelAccessToken: LINE_CONFIG.channelAccessToken
 });
 
-// session: { userId: { step: 1/2/3, prescription:{}, serial:{}, mask:{} } }
+// session: { userId: { step:1/2, prescription:{}, serial:{}, mask:{} } }
 const sessions = {};
 
 app.get('/', (req, res) => res.send('3N CPAP Bot is running ✅'));
@@ -58,17 +58,10 @@ async function handleEvent(event) {
         return;
       }
       sessions[userId].step = 2;
-      await reply(replyToken, '🔲 ส่งรูป Serial เครื่องได้เลยครับ');
-      return;
-    }
-
-    if (text === '3') {
-      if (!sessions[userId]?.serial) {
-        await reply(replyToken, '⚠️ กรุณาส่ง Serial เครื่องก่อน (พิมพ์ 2)');
-        return;
-      }
-      sessions[userId].step = 3;
-      await reply(replyToken, '😷 ส่งรูปหน้ากากได้เลยครับ (หรือพิมพ์ บันทึก ถ้าไม่มีหน้ากาก)');
+      await reply(replyToken,
+        '🔲 ส่งรูป Serial เครื่องได้เลยครับ\n' +
+        '(ส่งรูป Mask ต่อได้เลย ไม่ต้องพิมพ์ 3)'
+      );
       return;
     }
 
@@ -83,6 +76,7 @@ async function handleEvent(event) {
           `👤 ${p.patient_name||'-'}\n🏥 HN: ${p.hn||'-'}\n` +
           `📅 ${p.date||'-'}\n💊 ${p.product_name||'-'}\n` +
           `🔲 SN: ${session.serial.serial_number||'-'}\n` +
+          `😷 Mask: ${session.mask?`${session.mask.model} (${session.mask.size})`:'-'}\n` +
           `💰 ${p.price||'-'} บาท`
         );
       } else {
@@ -91,30 +85,29 @@ async function handleEvent(event) {
       return;
     }
 
-    if (text === 'ยกเลิก' || text === 'cancel' || text === '0') {
+    if (text === 'ยกเลิก' || text === '0') {
       delete sessions[userId];
-      await reply(replyToken, '🗑️ ล้างข้อมูลแล้ว\n\nพิมพ์ 1 เพื่อเริ่มใหม่');
+      await reply(replyToken, '🗑️ ล้างข้อมูลแล้ว\nพิมพ์ 1 เพื่อเริ่มใหม่');
       return;
     }
 
-    if (text === 'status' || text === 'สถานะ') {
+    if (text === 'สถานะ' || text === 'status') {
       const s = sessions[userId] || {};
       const has = (k) => s[k] ? '✅' : '⬜';
       await reply(replyToken,
         `📊 สถานะ:\n${has('prescription')} 1. ใบสั่งยา\n` +
         `${has('serial')} 2. Serial เครื่อง\n${has('mask')} 3. Mask\n\n` +
-        `พิมพ์ 1/2/3 เพื่อส่งรูป\nพิมพ์ "บันทึก" เมื่อพร้อม`
+        `พิมพ์ "บันทึก" เมื่อพร้อม`
       );
       return;
     }
 
-    // คำสั่งหลัก
     if (text === 'help' || text === 'ช่วยเหลือ') {
       await reply(replyToken,
-        `🤖 3NEXA AI — วิธีใช้\n──────────────────\n` +
+        `🤖 วิธีใช้ 3NEXA AI\n──────────────────\n` +
         `พิมพ์ 1 → ส่งรูปใบสั่งยา\n` +
         `พิมพ์ 2 → ส่งรูป Serial เครื่อง\n` +
-        `พิมพ์ 3 → ส่งรูปหน้ากาก\n` +
+        `         (แล้วส่งรูป Mask ต่อได้เลย)\n` +
         `พิมพ์ "บันทึก" → บันทึกลง Sheet\n` +
         `พิมพ์ "สถานะ" → ดูข้อมูลที่อ่านแล้ว\n` +
         `พิมพ์ 0 → ยกเลิก/เริ่มใหม่`
@@ -129,58 +122,67 @@ async function handleEvent(event) {
     const session = sessions[userId];
 
     if (!session || !session.step) {
-      await push(chatId, `⚠️ กรุณาพิมพ์ก่อนส่งรูป:\n1 = ใบสั่งยา\n2 = Serial เครื่อง\n3 = หน้ากาก`);
+      await push(chatId,
+        `⚠️ กรุณาพิมพ์ก่อนส่งรูป:\n` +
+        `พิมพ์ 1 = ส่งใบสั่งยา\n` +
+        `พิมพ์ 2 = ส่ง Serial เครื่อง`
+      );
       return;
     }
 
     try {
       const imageBuffer = await downloadLineImage(message.id);
       const base64 = imageBuffer.toString('base64');
-      const data = await extractFromImage(base64, session.step);
-
-      let msgText = '';
 
       if (session.step === 1) {
+        // อ่านใบสั่งยา
+        const data = await extractFromImage(base64, 1);
         session.prescription = data;
         session.step = null;
-        msgText = `📄 อ่านใบสั่งยาแล้ว\n──────────────────\n` +
+        await push(chatId,
+          `📄 อ่านใบสั่งยาแล้ว\n──────────────────\n` +
           `👤 ${data.patient_name||'-'}\n🏥 HN: ${data.hn||'-'}\n` +
           `🔰 สิทธิ์: ${data.rights||'-'}\n💊 ${data.product_name||'-'}\n` +
           `💰 ${data.price||'-'} บาท\n\n` +
-          `⏭️ พิมพ์ 2 เพื่อส่งรูป Serial เครื่อง`;
+          `⏭️ พิมพ์ 2 เพื่อส่งรูป Serial เครื่อง`
+        );
 
       } else if (session.step === 2) {
-        session.serial = data;
-        session.step = null;
-        msgText = `🔲 อ่าน Serial แล้ว\n──────────────────\n` +
-          `Brand: ${data.brand||'-'}\nModel: ${data.model||'-'}\nSN: ${data.serial_number||'-'}\n\n` +
-          `⏭️ พิมพ์ 3 ส่งรูปหน้ากาก หรือพิมพ์ "บันทึก" เลย`;
+        // อ่านรูป — อาจเป็น Serial หรือ Mask ก็ได้
+        const data = await extractFromImage(base64, 2);
+        const docType = data.doc_type;
 
-      } else if (session.step === 3) {
-        session.mask = data;
-        session.step = null;
-        // ถ้ามี prescription + serial แล้ว → บันทึกทันที
-        if (session.prescription && session.serial) {
-          const rowNum = await saveToSheets(session);
-          const p = session.prescription;
-          msgText = `✅ บันทึกสำเร็จ! (แถว ${rowNum})\n──────────────────\n` +
-            `👤 ${p.patient_name||'-'}\n🏥 HN: ${p.hn||'-'}\n` +
-            `📅 ${p.date||'-'}\n💊 ${p.product_name||'-'}\n` +
-            `🔲 SN: ${session.serial.serial_number||'-'}\n` +
-            `😷 ${data.model||'-'} (${data.size||'-'})\n` +
-            `💰 ${p.price||'-'} บาท`;
-          delete sessions[userId];
+        if (docType === 'serial') {
+          session.serial = data;
+          // ไม่ reset step — รอ Mask ต่อได้เลย
+          let msg = `🔲 อ่าน Serial แล้ว\n──────────────────\n` +
+            `Brand: ${data.brand||'-'}\nModel: ${data.model||'-'}\nSN: ${data.serial_number||'-'}\n\n` +
+            `ส่งรูป Mask ต่อได้เลย หรือพิมพ์ "บันทึก"`;
+          await push(chatId, msg);
+
+        } else if (docType === 'mask') {
+          session.mask = data;
+          let msg = `😷 อ่าน Mask แล้ว\n──────────────────\n` +
+            `Brand: ${data.brand||'-'}\nModel: ${data.model||'-'}\nSize: ${data.size||'-'}`;
+
+          // ถ้าครบ → บันทึกเลย
+          if (session.prescription && session.serial) {
+            const rowNum = await saveToSheets(session);
+            const p = session.prescription;
+            msg = `✅ บันทึกสำเร็จ! (แถว ${rowNum})\n──────────────────\n` +
+              `👤 ${p.patient_name||'-'}\n🏥 HN: ${p.hn||'-'}\n` +
+              `📅 ${p.date||'-'}\n💊 ${p.product_name||'-'}\n` +
+              `🔲 SN: ${session.serial.serial_number||'-'}\n` +
+              `😷 ${data.model||'-'} (${data.size||'-'})\n` +
+              `💰 ${p.price||'-'} บาท`;
+            delete sessions[userId];
+          }
+          await push(chatId, msg);
+
         } else {
-          msgText = `😷 อ่าน Mask แล้ว\nBrand: ${data.brand||'-'}\nModel: ${data.model||'-'}\nSize: ${data.size||'-'}`;
+          await push(chatId, `⚠️ ระบุประเภทไม่ได้ กรุณาส่งรูปใหม่`);
         }
       }
-
-      // ถ้าครบ prescription + serial (กรณีส่งแค่ 2 รูป แล้วมาพิมพ์บันทึก)
-      if (sessions[userId]?.prescription && sessions[userId]?.serial && !sessions[userId]?.step) {
-        // รอให้ user พิมพ์ บันทึก หรือส่งรูป Mask
-      }
-
-      await push(chatId, msgText);
 
     } catch (err) {
       console.error('Image error:', err.message);
@@ -190,18 +192,18 @@ async function handleEvent(event) {
 }
 
 async function extractFromImage(base64, step) {
-  // บอก Claude ว่ารูปนี้คือประเภทอะไร ตามที่ user บอก
-  const typeHint = step === 1 ? 'ใบสั่งยา/ใบรายการยาของโรงพยาบาล'
-    : step === 2 ? 'ป้าย Serial Number ของเครื่อง CPAP หรือ BiPAP'
-    : 'ซองหรือกล่องหน้ากาก CPAP Mask';
+  const typeHint = step === 1
+    ? 'ใบสั่งยา/ใบรายการยาของโรงพยาบาลราชพิพัฒน์'
+    : 'ป้าย Serial Number ของเครื่อง CPAP/BiPAP หรือซองหน้ากาก CPAP Mask';
+
+  const jsonTemplate = step === 1
+    ? '{"doc_type":"prescription","date":"dd/mm/yyyy","order_no":"","hn":"","patient_name":"","rights":"","product_name":"","quantity":1,"price":"","doctor":""}'
+    : 'ถ้า Serial: {"doc_type":"serial","brand":"","model":"","serial_number":"","ref":""}\nถ้า Mask: {"doc_type":"mask","brand":"","model":"","size":"","lot":""}';
 
   const prompt = `คุณคือระบบอ่านเอกสาร CPAP ของ 3N Co., Ltd.
 รูปนี้คือ: ${typeHint}
 ตอบเป็น JSON เท่านั้น ไม่มีข้อความอื่น:
-
-${step === 1 ? '{"doc_type":"prescription","date":"dd/mm/yyyy","order_no":"","hn":"","patient_name":"","rights":"","product_name":"","quantity":1,"price":"","doctor":""}' : ''}
-${step === 2 ? '{"doc_type":"serial","brand":"","model":"","serial_number":"","ref":""}' : ''}
-${step === 3 ? '{"doc_type":"mask","brand":"","model":"","size":"","lot":""}' : ''}`;
+${jsonTemplate}`;
 
   const response = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
