@@ -25,33 +25,28 @@ const lineClient = new line.messagingApi.MessagingApiClient({
 });
 
 const sessions = {};
-// imageBuffers: เก็บ buffer รูปที่ download แล้ว per userId
-// { userId: [buffer1, buffer2, buffer3] }
 const imageBuffers = {};
 
 app.get('/', (req, res) => res.send('3N CPAP Bot is running ✅'));
 
 app.post('/webhook', line.middleware(LINE_CONFIG), async (req, res) => {
-  // ── Download รูปทุกรูปทันทีก่อน sendStatus ──────────────────
-  // Line content API expire เร็วมาก ต้อง download ก่อน
+  // Download รูปทุกรูปทันทีก่อน sendStatus
   const imageEvents = req.body.events.filter(e =>
     e.type === 'message' && e.message.type === 'image'
   );
 
-  // Download พร้อมกันทุกรูป
-  const downloadPromises = imageEvents.map(async (e) => {
+  await Promise.all(imageEvents.map(async (e) => {
     try {
       const buf = await downloadLineImage(e.message.id);
       const userId = e.source.userId || e.source.groupId || 'unknown';
       if (!imageBuffers[userId]) imageBuffers[userId] = {};
       imageBuffers[userId][e.message.id] = buf;
-      console.log(`Pre-downloaded image ${e.message.id} for ${userId}`);
+      console.log(`Pre-downloaded ${e.message.id}`);
     } catch (err) {
-      console.error(`Pre-download failed for ${e.message.id}:`, err.message);
+      console.error(`Pre-download failed ${e.message.id}:`, err.message);
     }
-  });
+  }));
 
-  await Promise.all(downloadPromises);
   res.sendStatus(200);
 
   for (const event of req.body.events) {
@@ -63,8 +58,8 @@ async function handleEvent(event) {
   if (event.type !== 'message') return;
   const { replyToken, source, message } = event;
   const userId = source.userId || source.groupId || 'unknown';
+  const chatId = source.groupId || source.userId || source.roomId;
 
-  // ── รับข้อความ ──────────────────────────────────────────────
   if (message.type === 'text') {
     const text = message.text.trim().toLowerCase();
 
@@ -74,7 +69,7 @@ async function handleEvent(event) {
         const rowNum = await saveToSheets(session);
         delete sessions[userId];
         const p = session.prescription;
-        await reply(replyToken,
+        await push(chatId,
           `✅ บันทึกสำเร็จ! (แถว ${rowNum})\n` +
           `──────────────────\n` +
           `👤 ${p.patient_name || '-'}\n` +
@@ -101,86 +96,73 @@ async function handleEvent(event) {
       const session = sessions[userId] || {};
       const has = (k) => session[k] ? '✅' : '⬜';
       await reply(replyToken,
-        `📊 สถานะข้อมูลปัจจุบัน:\n` +
+        `📊 สถานะ:\n` +
         `${has('prescription')} ใบสั่งยา\n` +
         `${has('serial')} Serial เครื่อง\n` +
-        `${has('mask')} Mask\n\n` +
-        (session.prescription && session.serial
-          ? `พร้อมบันทึก! พิมพ์ "บันทึก" หรือส่งรูป Mask ต่อได้เลย`
-          : `ยังไม่ครบ กรุณาส่งรูปให้ครบ`)
+        `${has('mask')} Mask`
       );
       return;
     }
     return;
   }
 
-  // ── รับรูป ───────────────────────────────────────────────────
   if (message.type === 'image') {
     if (!sessions[userId]) sessions[userId] = {};
     const session = sessions[userId];
 
     try {
-      // ใช้ buffer ที่ pre-download ไว้แล้ว
       const imageBuffer = imageBuffers[userId]?.[message.id];
       if (!imageBuffer) {
-        await reply(replyToken, `❌ ไม่พบรูป กรุณาส่งรูปใหม่อีกครั้ง`);
-        return;
+        console.log(`No buffer for ${message.id}`);
+        return; // เงียบ ไม่ reply เพราะอาจเป็นรูปที่ส่งพร้อมกัน
       }
 
-      // ลบ buffer ที่ใช้แล้ว
       delete imageBuffers[userId][message.id];
 
       const base64 = imageBuffer.toString('base64');
       const data = await extractFromImage(base64);
       const docType = data.doc_type || 'unknown';
 
-      let replyText = '';
+      let msgText = '';
 
       if (docType === 'prescription') {
         session.prescription = data;
-        replyText =
+        msgText =
           `📄 อ่านใบสั่งยาแล้ว\n` +
           `──────────────────\n` +
           `👤 ${data.patient_name || '-'}\n` +
           `🏥 HN: ${data.hn || '-'}\n` +
           `🔰 สิทธิ์: ${data.rights || '-'}\n` +
           `💊 ${data.product_name || '-'}\n` +
-          `💰 ${data.price || '-'} บาท\n\n` +
-          `⏭️ ส่งรูป Serial เครื่องต่อได้เลย`;
+          `💰 ${data.price || '-'} บาท`;
 
       } else if (docType === 'serial') {
         session.serial = data;
-        replyText =
+        msgText =
           `🔲 อ่าน Serial แล้ว\n` +
           `──────────────────\n` +
           `Brand: ${data.brand || '-'}\n` +
           `Model: ${data.model || '-'}\n` +
-          `SN: ${data.serial_number || '-'}\n\n` +
-          (session.prescription
-            ? `⏭️ ส่งรูป Mask ต่อได้ หรือพิมพ์ "บันทึก" เลย`
-            : `⏭️ ส่งรูปใบสั่งยาด้วยครับ`);
+          `SN: ${data.serial_number || '-'}`;
 
       } else if (docType === 'mask') {
         session.mask = data;
-        replyText =
+        msgText =
           `😷 อ่าน Mask แล้ว\n` +
           `──────────────────\n` +
           `Brand: ${data.brand || '-'}\n` +
           `Model: ${data.model || '-'}\n` +
-          `Size: ${data.size || '-'}\n\n` +
-          (session.prescription && session.serial
-            ? `กำลังบันทึก...`
-            : `⏭️ ยังขาดรูปใบสั่งยาหรือ Serial`);
+          `Size: ${data.size || '-'}`;
 
       } else {
-        replyText = `⚠️ ระบุประเภทเอกสารไม่ได้\nกรุณาส่งรูป: ใบสั่งยา / Serial เครื่อง / ซองหน้ากาก`;
+        msgText = `⚠️ ระบุประเภทเอกสารไม่ได้`;
       }
 
-      // ถ้าครบ prescription + serial → บันทึกทันที
+      // ถ้าครบ → บันทึก
       if (session.prescription && session.serial) {
         const rowNum = await saveToSheets(session);
         const p = session.prescription;
-        replyText =
+        msgText =
           `✅ บันทึกสำเร็จ! (แถว ${rowNum})\n` +
           `──────────────────\n` +
           `👤 ${p.patient_name || '-'}\n` +
@@ -194,11 +176,12 @@ async function handleEvent(event) {
         delete imageBuffers[userId];
       }
 
-      await reply(replyToken, replyText);
+      // ใช้ push แทน reply เพราะส่งหลายรูปพร้อมกัน replyToken ใช้ได้ครั้งเดียว
+      await push(chatId, msgText);
 
     } catch (err) {
       console.error('Image error:', err.message);
-      await reply(replyToken, `❌ เกิดข้อผิดพลาด: ${err.message.substring(0, 80)}`);
+      await push(chatId, `❌ เกิดข้อผิดพลาด: ${err.message.substring(0, 80)}`);
     }
   }
 }
@@ -214,15 +197,15 @@ async function extractFromImage(base64) {
 - ถ้าเห็นชื่อหน้ากาก + Size S/M/L บนซองหรือกล่อง = mask
 
 ถ้าเป็น prescription:
-{"doc_type":"prescription","date":"วันที่ dd/mm/yyyy","order_no":"เลขที่ใบสั่ง","hn":"HN","patient_name":"ชื่อผู้ป่วย","rights":"สิทธิการรักษา","product_name":"ชื่อสินค้า","quantity":1,"price":"ราคาตัวเลขเท่านั้น","doctor":"ชื่อแพทย์"}
+{"doc_type":"prescription","date":"dd/mm/yyyy","order_no":"","hn":"","patient_name":"","rights":"","product_name":"","quantity":1,"price":"","doctor":""}
 
 ถ้าเป็น serial:
-{"doc_type":"serial","brand":"ResMed หรือ Hingmed หรือ Ventmed","model":"รุ่นสินค้า","serial_number":"SN","ref":"REF ถ้ามี"}
+{"doc_type":"serial","brand":"","model":"","serial_number":"","ref":""}
 
 ถ้าเป็น mask:
-{"doc_type":"mask","brand":"แบรนด์","model":"รุ่น","size":"S/M/L/XL","lot":"LOT ถ้ามี"}
+{"doc_type":"mask","brand":"","model":"","size":"","lot":""}
 
-ตอบ JSON เท่านั้น ห้ามมีข้อความอื่น`;
+ตอบ JSON เท่านั้น`;
 
   const response = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
@@ -247,24 +230,13 @@ async function saveToSheets(session) {
   const m = session.mask || {};
 
   const row = [
-    p.date || '',
-    p.hn || '',
-    p.patient_name || '',
-    p.rights || '',
-    p.order_no || '',
-    p.doctor || '',
-    p.product_name || '',
-    p.quantity || 1,
-    p.price || '',
-    s.brand || '',
-    s.model || '',
-    s.serial_number || '',
-    m.brand || '-',
-    m.model || '-',
-    m.size || '-',
+    p.date || '', p.hn || '', p.patient_name || '',
+    p.rights || '', p.order_no || '', p.doctor || '',
+    p.product_name || '', p.quantity || 1, p.price || '',
+    s.brand || '', s.model || '', s.serial_number || '',
+    m.brand || '-', m.model || '-', m.size || '-',
     `Spec_${(s.model || '').substring(0, 10)}`,
-    '✅ บันทึกแล้ว',
-    'ระบบ Auto'
+    '✅ บันทึกแล้ว', 'ระบบ Auto'
   ];
 
   const result = await sheets.spreadsheets.values.append({
@@ -274,8 +246,7 @@ async function saveToSheets(session) {
     requestBody: { values: [row] }
   });
 
-  const updatedRange = result.data.updates.updatedRange;
-  const match = updatedRange.match(/(\d+)$/);
+  const match = result.data.updates.updatedRange.match(/(\d+)$/);
   return match ? match[1] : '?';
 }
 
@@ -283,10 +254,7 @@ async function downloadLineImage(messageId) {
   const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
   const response = await axios.get(
     `https://api-data.line.me/v2/bot/message/${messageId}/content`,
-    {
-      headers: { Authorization: `Bearer ${token}` },
-      responseType: 'arraybuffer'
-    }
+    { headers: { Authorization: `Bearer ${token}` }, responseType: 'arraybuffer' }
   );
   return Buffer.from(response.data);
 }
@@ -294,6 +262,13 @@ async function downloadLineImage(messageId) {
 async function reply(replyToken, text) {
   await lineClient.replyMessage({
     replyToken,
+    messages: [{ type: 'text', text }]
+  });
+}
+
+async function push(to, text) {
+  await lineClient.pushMessage({
+    to,
     messages: [{ type: 'text', text }]
   });
 }
