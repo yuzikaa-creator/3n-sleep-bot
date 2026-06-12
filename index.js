@@ -25,39 +25,36 @@ const lineClient = new line.messagingApi.MessagingApiClient({
 });
 
 const sessions = {};
-// key = messageId (ง่ายที่สุด ไม่ต้องพึ่ง userId)
-const imageBuffers = {};
 
 app.get('/', (req, res) => res.send('3N CPAP Bot is running ✅'));
 
 app.post('/webhook', line.middleware(LINE_CONFIG), async (req, res) => {
-  // Download รูปทุกรูปทันที โดยใช้ messageId เป็น key
-  const imageEvents = req.body.events.filter(e =>
-    e.type === 'message' && e.message.type === 'image'
-  );
+  // ตอบ Line ก่อนเลย ไม่ให้ retry
+  res.sendStatus(200);
 
+  const events = req.body.events;
+  const imageEvents = events.filter(e => e.type === 'message' && e.message.type === 'image');
+
+  // Download รูปทุกรูปพร้อมกัน แล้วเก็บเป็น Map
+  const bufferMap = {};
   await Promise.all(imageEvents.map(async (e) => {
     try {
-      const buf = await downloadLineImage(e.message.id);
-      imageBuffers[e.message.id] = buf;
-      console.log(`Pre-downloaded messageId=${e.message.id}`);
+      bufferMap[e.message.id] = await downloadLineImage(e.message.id);
+      console.log(`Downloaded messageId=${e.message.id}`);
     } catch (err) {
-      console.error(`Pre-download failed ${e.message.id}:`, err.message);
+      console.error(`Download failed ${e.message.id}:`, err.message);
     }
   }));
 
-  res.sendStatus(200);
-
-  for (const event of req.body.events) {
-    await handleEvent(event).catch(err => console.error('Event error:', err.message));
+  // ประมวลผลทุก event พร้อม bufferMap
+  for (const event of events) {
+    await handleEvent(event, bufferMap).catch(err => console.error('Event error:', err.message));
   }
 });
 
-async function handleEvent(event) {
+async function handleEvent(event, bufferMap = {}) {
   if (event.type !== 'message') return;
   const { replyToken, source, message } = event;
-
-  // ใช้ groupId ถ้าอยู่ใน group, ไม่งั้นใช้ userId
   const userId = source.groupId || source.userId || 'unknown';
   const chatId = source.groupId || source.userId || 'unknown';
 
@@ -72,9 +69,9 @@ async function handleEvent(event) {
         const p = session.prescription;
         await push(chatId,
           `✅ บันทึกสำเร็จ! (แถว ${rowNum})\n──────────────────\n` +
-          `👤 ${p.patient_name || '-'}\n🏥 HN: ${p.hn || '-'}\n` +
-          `📅 ${p.date || '-'}\n💊 ${p.product_name || '-'}\n` +
-          `🔲 SN: ${session.serial.serial_number || '-'}\n💰 ${p.price || '-'} บาท`
+          `👤 ${p.patient_name||'-'}\n🏥 HN: ${p.hn||'-'}\n` +
+          `📅 ${p.date||'-'}\n💊 ${p.product_name||'-'}\n` +
+          `🔲 SN: ${session.serial.serial_number||'-'}\n💰 ${p.price||'-'} บาท`
         );
       } else {
         await reply(replyToken, '⚠️ ข้อมูลยังไม่ครบ กรุณาส่งรูปใบสั่งยาและ Serial');
@@ -104,14 +101,12 @@ async function handleEvent(event) {
     if (!sessions[userId]) sessions[userId] = {};
     const session = sessions[userId];
 
-    // ดึง buffer จาก messageId โดยตรง
-    const imageBuffer = imageBuffers[message.id];
+    const imageBuffer = bufferMap[message.id];
     if (!imageBuffer) {
       console.log(`No buffer for messageId=${message.id}`);
-      await push(chatId, `❌ ไม่พบรูป messageId=${message.id} กรุณาส่งใหม่`);
+      await push(chatId, `❌ ไม่พบรูป กรุณาส่งรูปใหม่อีกครั้ง`);
       return;
     }
-    delete imageBuffers[message.id];
 
     try {
       const base64 = imageBuffer.toString('base64');
@@ -122,34 +117,34 @@ async function handleEvent(event) {
       if (docType === 'prescription') {
         session.prescription = data;
         msgText = `📄 อ่านใบสั่งยาแล้ว\n──────────────────\n` +
-          `👤 ${data.patient_name || '-'}\n🏥 HN: ${data.hn || '-'}\n` +
-          `🔰 สิทธิ์: ${data.rights || '-'}\n💊 ${data.product_name || '-'}\n` +
-          `💰 ${data.price || '-'} บาท`;
+          `👤 ${data.patient_name||'-'}\n🏥 HN: ${data.hn||'-'}\n` +
+          `🔰 สิทธิ์: ${data.rights||'-'}\n💊 ${data.product_name||'-'}\n` +
+          `💰 ${data.price||'-'} บาท`;
 
       } else if (docType === 'serial') {
         session.serial = data;
         msgText = `🔲 อ่าน Serial แล้ว\n──────────────────\n` +
-          `Brand: ${data.brand || '-'}\nModel: ${data.model || '-'}\nSN: ${data.serial_number || '-'}`;
+          `Brand: ${data.brand||'-'}\nModel: ${data.model||'-'}\nSN: ${data.serial_number||'-'}`;
 
       } else if (docType === 'mask') {
         session.mask = data;
         msgText = `😷 อ่าน Mask แล้ว\n──────────────────\n` +
-          `Brand: ${data.brand || '-'}\nModel: ${data.model || '-'}\nSize: ${data.size || '-'}`;
+          `Brand: ${data.brand||'-'}\nModel: ${data.model||'-'}\nSize: ${data.size||'-'}`;
 
       } else {
         msgText = `⚠️ ระบุประเภทเอกสารไม่ได้`;
       }
 
-      // ถ้าครบ prescription + serial → บันทึกทันที
+      // ครบ prescription + serial → บันทึกทันที
       if (session.prescription && session.serial) {
         const rowNum = await saveToSheets(session);
         const p = session.prescription;
         msgText = `✅ บันทึกสำเร็จ! (แถว ${rowNum})\n──────────────────\n` +
-          `👤 ${p.patient_name || '-'}\n🏥 HN: ${p.hn || '-'}\n` +
-          `📅 ${p.date || '-'}\n💊 ${p.product_name || '-'}\n` +
-          `🔲 SN: ${session.serial.serial_number || '-'}\n` +
-          `😷 Mask: ${session.mask ? `${session.mask.model} (${session.mask.size})` : '-'}\n` +
-          `💰 ${p.price || '-'} บาท`;
+          `👤 ${p.patient_name||'-'}\n🏥 HN: ${p.hn||'-'}\n` +
+          `📅 ${p.date||'-'}\n💊 ${p.product_name||'-'}\n` +
+          `🔲 SN: ${session.serial.serial_number||'-'}\n` +
+          `😷 Mask: ${session.mask?`${session.mask.model} (${session.mask.size})`:'-'}\n` +
+          `💰 ${p.price||'-'} บาท`;
         delete sessions[userId];
       }
 
@@ -157,7 +152,7 @@ async function handleEvent(event) {
 
     } catch (err) {
       console.error('Image error:', err.message);
-      await push(chatId, `❌ เกิดข้อผิดพลาด: ${err.message.substring(0, 80)}`);
+      await push(chatId, `❌ เกิดข้อผิดพลาด: ${err.message.substring(0,80)}`);
     }
   }
 }
@@ -165,15 +160,12 @@ async function handleEvent(event) {
 async function extractFromImage(base64) {
   const prompt = `คุณคือระบบอ่านเอกสารการขาย CPAP ของ 3N Co., Ltd. โรงพยาบาลราชพิพัฒน์
 วิเคราะห์รูปนี้แล้วตอบเป็น JSON เท่านั้น ไม่มีข้อความอื่น:
-
 - ถ้าเห็นชื่อผู้ป่วย/HN/สิทธิการรักษา/ใบรายการยา/ราคา = prescription
 - ถ้าเห็น SN/Serial Number บนป้ายเครื่อง CPAP/BiPAP = serial
 - ถ้าเห็นชื่อหน้ากาก+Size บนซองหรือกล่อง = mask
-
 prescription: {"doc_type":"prescription","date":"dd/mm/yyyy","order_no":"","hn":"","patient_name":"","rights":"","product_name":"","quantity":1,"price":"","doctor":""}
 serial: {"doc_type":"serial","brand":"","model":"","serial_number":"","ref":""}
 mask: {"doc_type":"mask","brand":"","model":"","size":"","lot":""}
-
 ตอบ JSON เท่านั้น`;
 
   const response = await anthropic.messages.create({
@@ -193,10 +185,7 @@ mask: {"doc_type":"mask","brand":"","model":"","size":"","lot":""}
 }
 
 async function saveToSheets(session) {
-  const p = session.prescription || {};
-  const s = session.serial || {};
-  const m = session.mask || {};
-
+  const p = session.prescription||{}, s = session.serial||{}, m = session.mask||{};
   const row = [
     p.date||'', p.hn||'', p.patient_name||'', p.rights||'',
     p.order_no||'', p.doctor||'', p.product_name||'', p.quantity||1, p.price||'',
@@ -204,14 +193,12 @@ async function saveToSheets(session) {
     m.brand||'-', m.model||'-', m.size||'-',
     `Spec_${(s.model||'').substring(0,10)}`, '✅ บันทึกแล้ว', 'ระบบ Auto'
   ];
-
   const result = await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
     range: 'รายการขาย!A:R',
     valueInputOption: 'RAW',
     requestBody: { values: [row] }
   });
-
   const match = result.data.updates.updatedRange.match(/(\d+)$/);
   return match ? match[1] : '?';
 }
