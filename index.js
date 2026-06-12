@@ -24,14 +24,36 @@ const lineClient = new line.messagingApi.MessagingApiClient({
   channelAccessToken: LINE_CONFIG.channelAccessToken
 });
 
-// Session: เก็บข้อมูลรอครบ per user
-// { userId: { prescription:{}, serial:{}, mask:{} } }
 const sessions = {};
+// imageBuffers: เก็บ buffer รูปที่ download แล้ว per userId
+// { userId: [buffer1, buffer2, buffer3] }
+const imageBuffers = {};
 
 app.get('/', (req, res) => res.send('3N CPAP Bot is running ✅'));
 
 app.post('/webhook', line.middleware(LINE_CONFIG), async (req, res) => {
+  // ── Download รูปทุกรูปทันทีก่อน sendStatus ──────────────────
+  // Line content API expire เร็วมาก ต้อง download ก่อน
+  const imageEvents = req.body.events.filter(e =>
+    e.type === 'message' && e.message.type === 'image'
+  );
+
+  // Download พร้อมกันทุกรูป
+  const downloadPromises = imageEvents.map(async (e) => {
+    try {
+      const buf = await downloadLineImage(e.message.id);
+      const userId = e.source.userId || e.source.groupId || 'unknown';
+      if (!imageBuffers[userId]) imageBuffers[userId] = {};
+      imageBuffers[userId][e.message.id] = buf;
+      console.log(`Pre-downloaded image ${e.message.id} for ${userId}`);
+    } catch (err) {
+      console.error(`Pre-download failed for ${e.message.id}:`, err.message);
+    }
+  });
+
+  await Promise.all(downloadPromises);
   res.sendStatus(200);
+
   for (const event of req.body.events) {
     await handleEvent(event).catch(err => console.error('Event error:', err.message));
   }
@@ -70,6 +92,7 @@ async function handleEvent(event) {
 
     if (text === 'ยกเลิก' || text === 'cancel') {
       delete sessions[userId];
+      delete imageBuffers[userId];
       await reply(replyToken, '🗑️ ล้างข้อมูลแล้ว เริ่มใหม่ได้เลยครับ');
       return;
     }
@@ -97,11 +120,17 @@ async function handleEvent(event) {
     const session = sessions[userId];
 
     try {
-      // Download รูปจาก Line
-      const imageBuffer = await downloadLineImage(message.id);
-      const base64 = imageBuffer.toString('base64');
+      // ใช้ buffer ที่ pre-download ไว้แล้ว
+      const imageBuffer = imageBuffers[userId]?.[message.id];
+      if (!imageBuffer) {
+        await reply(replyToken, `❌ ไม่พบรูป กรุณาส่งรูปใหม่อีกครั้ง`);
+        return;
+      }
 
-      // Claude อ่านรูป
+      // ลบ buffer ที่ใช้แล้ว
+      delete imageBuffers[userId][message.id];
+
+      const base64 = imageBuffer.toString('base64');
       const data = await extractFromImage(base64);
       const docType = data.doc_type || 'unknown';
 
@@ -147,7 +176,7 @@ async function handleEvent(event) {
         replyText = `⚠️ ระบุประเภทเอกสารไม่ได้\nกรุณาส่งรูป: ใบสั่งยา / Serial เครื่อง / ซองหน้ากาก`;
       }
 
-      // ถ้าครบแล้ว บันทึกทันที
+      // ถ้าครบ prescription + serial → บันทึกทันที
       if (session.prescription && session.serial) {
         const rowNum = await saveToSheets(session);
         const p = session.prescription;
@@ -162,6 +191,7 @@ async function handleEvent(event) {
           `😷 Mask: ${session.mask ? `${session.mask.model} (${session.mask.size})` : '-'}\n` +
           `💰 ${p.price || '-'} บาท`;
         delete sessions[userId];
+        delete imageBuffers[userId];
       }
 
       await reply(replyToken, replyText);
@@ -180,17 +210,17 @@ async function extractFromImage(base64) {
 
 กฎการแยกประเภท:
 - ถ้าเห็นชื่อผู้ป่วย / HN / สิทธิการรักษา / ใบรายการยา / ราคา / โรงพยาบาลราชพิพัฒน์ = prescription
-- ถ้าเห็น SN หรือ Serial Number บนป้ายเครื่อง CPAP/BiPAP = serial  
+- ถ้าเห็น SN หรือ Serial Number บนป้ายเครื่อง CPAP/BiPAP = serial
 - ถ้าเห็นชื่อหน้ากาก + Size S/M/L บนซองหรือกล่อง = mask
 
 ถ้าเป็น prescription:
-{"doc_type":"prescription","date":"วันที่ในรูป dd/mm/yyyy","order_no":"เลขที่ใบสั่ง","hn":"HN","patient_name":"ชื่อผู้ป่วย","rights":"สิทธิการรักษา","product_name":"ชื่อสินค้าที่สั่ง","quantity":1,"price":"ราคา ตัวเลขเท่านั้น","doctor":"ชื่อแพทย์"}
+{"doc_type":"prescription","date":"วันที่ dd/mm/yyyy","order_no":"เลขที่ใบสั่ง","hn":"HN","patient_name":"ชื่อผู้ป่วย","rights":"สิทธิการรักษา","product_name":"ชื่อสินค้า","quantity":1,"price":"ราคาตัวเลขเท่านั้น","doctor":"ชื่อแพทย์"}
 
 ถ้าเป็น serial:
-{"doc_type":"serial","brand":"ResMed หรือ Hingmed หรือ Ventmed","model":"รุ่นสินค้า","serial_number":"SN number","ref":"REF number ถ้ามี"}
+{"doc_type":"serial","brand":"ResMed หรือ Hingmed หรือ Ventmed","model":"รุ่นสินค้า","serial_number":"SN","ref":"REF ถ้ามี"}
 
 ถ้าเป็น mask:
-{"doc_type":"mask","brand":"แบรนด์","model":"รุ่น","size":"S หรือ M หรือ L หรือ XL","lot":"LOT number ถ้ามี"}
+{"doc_type":"mask","brand":"แบรนด์","model":"รุ่น","size":"S/M/L/XL","lot":"LOT ถ้ามี"}
 
 ตอบ JSON เท่านั้น ห้ามมีข้อความอื่น`;
 
@@ -251,7 +281,6 @@ async function saveToSheets(session) {
 
 async function downloadLineImage(messageId) {
   const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-  console.log(`Downloading image ${messageId} with token: ${token ? token.substring(0,20)+'...' : 'MISSING'}`);
   const response = await axios.get(
     `https://api-data.line.me/v2/bot/message/${messageId}/content`,
     {
