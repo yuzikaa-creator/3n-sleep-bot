@@ -250,10 +250,12 @@ async function saveToSheets(session) {
 }
 
 async function downloadLineImage(messageId) {
+  const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
+  console.log(`Downloading image ${messageId} with token: ${token ? token.substring(0,20)+'...' : 'MISSING'}`);
   const response = await axios.get(
     `https://api-data.line.me/v2/bot/message/${messageId}/content`,
     {
-      headers: { Authorization: `Bearer ${LINE_CONFIG.channelAccessToken}` },
+      headers: { Authorization: `Bearer ${token}` },
       responseType: 'arraybuffer'
     }
   );
