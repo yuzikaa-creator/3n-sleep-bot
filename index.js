@@ -66,9 +66,13 @@ async function handleEvent(event) {
     }
 
     // ── Mask shortcode เช่น RN20L, RN30M, RF06L ─────────────────
-    const maskCode = text.toUpperCase().match(/^([RH])([NF])(\d+)([SML])$/);
+    const upperText = text.toUpperCase().replace(/\s/g,'');
+    const validCodes = ['RN20S','RN20M','RN20L','RN30','RN30S','RN30M','RN30L',
+      'RF20S','RF20M','RF20L','RP10XS','RP10S','RP10M','RP10L',
+      'HNM','HNL','HFM','HFL'];
+    const maskCode = validCodes.includes(upperText);
     if (maskCode) {
-      const [, brand, type, model, size] = maskCode;
+      const [brand, type, model, size] = [upperText, upperText, upperText, upperText];
       const maskLookup = {
         // ResMed AirFit N20
         'RN20S': { brand:'ResMed', model:'AirFit N20', size:'Small'  },
@@ -95,7 +99,7 @@ async function handleEvent(event) {
         'HFM':   { brand:'Hingmed', model:'Full Face Mask', size:'Medium' },
         'HFL':   { brand:'Hingmed', model:'Full Face Mask', size:'Large'  },
       };
-      const key = text.toUpperCase().replace(/\s/g,'');
+      const key = upperText;
       const maskData = maskLookup[key] || null;
       if (!maskData) {
         await reply(replyToken,
