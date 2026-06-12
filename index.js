@@ -174,20 +174,25 @@ async function handleEvent(event) {
 }
 
 async function extractFromImage(base64) {
-  const prompt = `คุณคือระบบอ่านเอกสารการขาย CPAP ของ 3N Co., Ltd.
+  const prompt = `คุณคือระบบอ่านเอกสารการขาย CPAP ของ 3N Co., Ltd. โรงพยาบาลราชพิพัฒน์
 
-อ่านรูปนี้แล้ว extract ข้อมูล ตอบเป็น JSON เท่านั้น ไม่มีข้อความอื่น:
+วิเคราะห์รูปนี้แล้วตอบเป็น JSON เท่านั้น ไม่มีข้อความอื่น ไม่มี markdown:
 
-ถ้าเป็นใบรายการยา/ใบสั่งยา รพ.:
-{"doc_type":"prescription","date":"dd/mm/yyyy","order_no":"","hn":"","patient_name":"","rights":"","product_name":"","quantity":1,"price":"","doctor":""}
+กฎการแยกประเภท:
+- ถ้าเห็นชื่อผู้ป่วย / HN / สิทธิการรักษา / ใบรายการยา / ราคา / โรงพยาบาลราชพิพัฒน์ = prescription
+- ถ้าเห็น SN หรือ Serial Number บนป้ายเครื่อง CPAP/BiPAP = serial  
+- ถ้าเห็นชื่อหน้ากาก + Size S/M/L บนซองหรือกล่อง = mask
 
-ถ้าเป็นป้าย Serial เครื่อง CPAP/BiPAP:
-{"doc_type":"serial","brand":"ResMed หรือ Hingmed","model":"รุ่น","serial_number":"","ref":""}
+ถ้าเป็น prescription:
+{"doc_type":"prescription","date":"วันที่ในรูป dd/mm/yyyy","order_no":"เลขที่ใบสั่ง","hn":"HN","patient_name":"ชื่อผู้ป่วย","rights":"สิทธิการรักษา","product_name":"ชื่อสินค้าที่สั่ง","quantity":1,"price":"ราคา ตัวเลขเท่านั้น","doctor":"ชื่อแพทย์"}
 
-ถ้าเป็นกล่อง/ซอง Mask:
-{"doc_type":"mask","brand":"","model":"","size":"S/M/L","lot":""}
+ถ้าเป็น serial:
+{"doc_type":"serial","brand":"ResMed หรือ Hingmed หรือ Ventmed","model":"รุ่นสินค้า","serial_number":"SN number","ref":"REF number ถ้ามี"}
 
-ตอบ JSON เท่านั้น`;
+ถ้าเป็น mask:
+{"doc_type":"mask","brand":"แบรนด์","model":"รุ่น","size":"S หรือ M หรือ L หรือ XL","lot":"LOT number ถ้ามี"}
+
+ตอบ JSON เท่านั้น ห้ามมีข้อความอื่น`;
 
   const response = await anthropic.messages.create({
     model: 'claude-haiku-4-5-20251001',
