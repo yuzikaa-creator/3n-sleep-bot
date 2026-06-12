@@ -65,6 +65,75 @@ async function handleEvent(event) {
       return;
     }
 
+    // ── Mask shortcode เช่น RN20L, RN30M, RF06L ─────────────────
+    const maskCode = text.toUpperCase().match(/^([RH])([NF])(\d+)([SML])$/);
+    if (maskCode) {
+      const [, brand, type, model, size] = maskCode;
+      const maskLookup = {
+        // ResMed AirFit N20
+        'RN20S': { brand:'ResMed', model:'AirFit N20', size:'Small'  },
+        'RN20M': { brand:'ResMed', model:'AirFit N20', size:'Medium' },
+        'RN20L': { brand:'ResMed', model:'AirFit N20', size:'Large'  },
+        // ResMed AirFit N30
+        'RN30':  { brand:'ResMed', model:'AirFit N30', size:'-'      },
+        'RN30S': { brand:'ResMed', model:'AirFit N30', size:'Small'  },
+        'RN30M': { brand:'ResMed', model:'AirFit N30', size:'Medium' },
+        'RN30L': { brand:'ResMed', model:'AirFit N30', size:'Large'  },
+        // ResMed AirFit F20 (Full Face)
+        'RF20S': { brand:'ResMed', model:'AirFit F20', size:'Small'  },
+        'RF20M': { brand:'ResMed', model:'AirFit F20', size:'Medium' },
+        'RF20L': { brand:'ResMed', model:'AirFit F20', size:'Large'  },
+        // ResMed AirFit P10 (Nasal Pillow)
+        'RP10XS':{ brand:'ResMed', model:'AirFit P10', size:'XSmall' },
+        'RP10S': { brand:'ResMed', model:'AirFit P10', size:'Small'  },
+        'RP10M': { brand:'ResMed', model:'AirFit P10', size:'Medium' },
+        'RP10L': { brand:'ResMed', model:'AirFit P10', size:'Large'  },
+        // Hingmed Nasal Mask
+        'HNM':   { brand:'Hingmed', model:'Nasal Mask', size:'Medium' },
+        'HNL':   { brand:'Hingmed', model:'Nasal Mask', size:'Large'  },
+        // Hingmed Full Face Mask
+        'HFM':   { brand:'Hingmed', model:'Full Face Mask', size:'Medium' },
+        'HFL':   { brand:'Hingmed', model:'Full Face Mask', size:'Large'  },
+      };
+      const key = text.toUpperCase().replace(/\s/g,'');
+      const maskData = maskLookup[key] || null;
+      if (!maskData) {
+        await reply(replyToken,
+          `⚠️ ไม่รู้จัก Mask code: ${text}
+
+ตัวอย่าง:
+RN20L, RN20M, RN20S
+RN30
+RF20S, RF20M, RF20L
+RP10XS, RP10S, RP10M, RP10L
+HNL, HNM, HFL, HFM`
+        );
+        return;
+      }
+
+      if (!sessions[userId]) sessions[userId] = {};
+      sessions[userId].mask = maskData;
+
+      let msg = `😷 บันทึก Mask แล้ว\n` +
+        `Brand: ${maskData.brand}\nModel: ${maskData.model}\nSize: ${maskData.size}`;
+
+      // ถ้าครบ → บันทึก Sheet
+      const session = sessions[userId];
+      if (session.prescription && session.serial) {
+        const rowNum = await saveToSheets(session);
+        const p = session.prescription;
+        msg = `✅ บันทึกสำเร็จ! (แถว ${rowNum})\n──────────────────\n` +
+          `👤 ${p.patient_name||'-'}\n🏥 HN: ${p.hn||'-'}\n` +
+          `📅 ${p.date||'-'}\n💊 ${p.product_name||'-'}\n` +
+          `🔲 SN: ${session.serial.serial_number||'-'}\n` +
+          `😷 ${maskData.model} (${maskData.size})\n` +
+          `💰 ${p.price||'-'} บาท`;
+        delete sessions[userId];
+      }
+      await reply(replyToken, msg);
+      return;
+    }
+
     if (text === 'บันทึก' || text === 'save') {
       const session = sessions[userId] || {};
       if (session.prescription && session.serial) {
