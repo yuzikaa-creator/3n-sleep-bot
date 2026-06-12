@@ -38,7 +38,7 @@ app.post('/webhook', line.middleware(LINE_CONFIG), async (req, res) => {
   await Promise.all(imageEvents.map(async (e) => {
     try {
       const buf = await downloadLineImage(e.message.id);
-      const userId = e.source.userId || e.source.groupId || 'unknown';
+      const userId = e.source.groupId || e.source.userId || e.source.roomId || 'unknown';
       if (!imageBuffers[userId]) imageBuffers[userId] = {};
       imageBuffers[userId][e.message.id] = buf;
       console.log(`Pre-downloaded ${e.message.id}`);
