@@ -31,7 +31,13 @@ app.get('/', (req, res) => res.send('3N CPAP Bot is running ✅'));
 
 app.post('/webhook', line.middleware(LINE_CONFIG), async (req, res) => {
   res.sendStatus(200);
+  const now = Date.now();
   for (const event of req.body.events) {
+    // ข้าม event เก่าเกิน 60 วินาที (กัน Line retry รูปค้าง → 429)
+    if (event.timestamp && (now - event.timestamp > 60000)) {
+      console.log(`Skipped old event (${Math.round((now-event.timestamp)/1000)}s old)`);
+      continue;
+    }
     await handleEvent(event).catch(err => console.error('Event error:', err.message));
   }
 });
@@ -331,4 +337,4 @@ async function push(to, text) {
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`3N Bot running on port ${PORT}`));
+app.listen(PORT, () => console.log(`3N Bot running on port ${PORT}`));v
