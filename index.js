@@ -337,4 +337,4 @@ async function push(to, text) {
 }
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`3N Bot running on port ${PORT}`));v
+app.listen(PORT, () => console.log(`3N Bot running on port ${PORT}`));
