@@ -47,11 +47,9 @@ async function handleEvent(event) {
   const { replyToken, source, message } = event;
   const userId = source.userId;
 
-  // ============ รับข้อความ ============
   if (message.type === 'text') {
     const text = message.text.trim().toUpperCase();
 
-    // พิมพ์ OPD → พร้อมรับรูป
     if (text === 'OPD') {
       opdReady[userId] = Date.now();
       await lineClient.replyMessage({
@@ -61,30 +59,22 @@ async function handleEvent(event) {
       return;
     }
 
-    // @3N
     if (message.text.includes('@3N') || message.text.includes('@3n')) {
       await lineClient.replyMessage({
         replyToken,
-        messages: [{ type: 'text', text: `สวัสดีครับ 🤖 3N Bot\nพิมพ์ "OPD" แล้วส่งรูปได้เลยครับ` }]
+        messages: [{ type: 'text', text: 'สวัสดีครับ 🤖 3N Bot\nพิมพ์ "OPD" แล้วส่งรูปได้เลยครับ' }]
       });
     }
     return;
   }
 
-  // ============ รับรูป ============
   if (message.type === 'image') {
-    // เช็คว่าพิมพ์ OPD แล้วไหม และยังไม่หมดเวลา 5 นาที
     const readyTime = opdReady[userId];
     const fiveMinutes = 5 * 60 * 1000;
 
     if (!readyTime || Date.now() - readyTime > fiveMinutes) {
-      // ไม่ได้พิมพ์ OPD ก่อน → เงียบ ไม่ทำอะไร
       return;
     }
-
-    // ลบ flag ออก (ส่งรูปได้ครั้งเดียวต่อการพิมพ์ OPD)
-    // ถ้าต้องการส่งหลายรูป comment บรรทัดนี้ออก
-    // delete opdReady[userId];
 
     try {
       const imageBuffer = await downloadLineImage(message.id);
@@ -99,7 +89,6 @@ async function handleEvent(event) {
         return;
       }
 
-      // อัปโหลดรูปขึ้น Google Drive
       let driveUrl = '';
       try {
         driveUrl = await uploadToDrive(imageBuffer, `OPD_${patientData.ชื่อนามสกุล || 'unknown'}_${Date.now()}.jpg`);
@@ -108,7 +97,6 @@ async function handleEvent(event) {
         driveUrl = 'อัปโหลดไม่สำเร็จ';
       }
 
-      // บันทึกลง Sheets
       await saveToSheets(patientData, driveUrl);
 
       await lineClient.replyMessage({
@@ -179,13 +167,13 @@ async function saveToSheets(data, driveUrl) {
 
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
-    range: 'Sheet1!A1'
+    range: '2026!A1'
   });
 
   if (!response.data.values) {
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: 'Sheet1!A1',
+      range: '2026!A1',
       valueInputOption: 'RAW',
       requestBody: {
         values: [['วันที่รับ','ชื่อ-นามสกุล','HN','เบอร์โทรหลัก','เบอร์โทรสำรอง','อายุ','น้ำหนัก (กก.)','ส่วนสูง (ซม.)','ประเภทการตรวจ','โรคประจำตัว','ยาที่ใช้','คะแนน ESS','แพทย์ผู้ส่ง','แผนก','โรงพยาบาล','สถานะ','รูป OPD']]
@@ -195,7 +183,7 @@ async function saveToSheets(data, driveUrl) {
 
   await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
-    range: 'Sheet1!A:Q',
+    range: '2026!A:Q',
     valueInputOption: 'RAW',
     requestBody: { values: [row] }
   });
@@ -232,4 +220,4 @@ async function extractOPDData(base64Image) {
 }
 
 const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => console.log(`3N Bot running on port ${PORT}`));
+app.listen(PORT, () => console.log(`3N Sleep Bot running on port ${PORT}`));
